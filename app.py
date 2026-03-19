@@ -1,17 +1,22 @@
 import io
-from typing import Optional, List, Dict
+from typing import Optional, List
 
 import pandas as pd
 import streamlit as st
 
-st.set_page_config(page_title="Búsqueda de empleado en Excel", page_icon="🔎", layout="wide")
-
+st.set_page_config(
+    page_title="Búsqueda de empleado en múltiples archivos Excel",
+    page_icon="🔎",
+    layout="wide",
+)
 
 EXPECTED_HEADERS = [
-    "# Emp",
+    "Archivo",
+    "Hoja",
+    "Número de empleado",
     "Nombre",
     "Mes",
-    "Periodo",
+    "Periodo de nómina",
     "UUID Vigente",
     "/559 Transferencia",
 ]
@@ -21,6 +26,8 @@ def normalize_text(value) -> str:
     if value is None:
         return ""
     text = str(value).strip()
+    if text.lower() == "nan":
+        return ""
     if text.endswith(".0"):
         try:
             float_val = float(text)
@@ -40,154 +47,201 @@ def get_excel_engine(filename: str) -> Optional[str]:
     return None
 
 
-def find_column(headers: List[str], exact: Optional[str] = None, contains_all: Optional[List[str]] = None) -> Optional[int]:
+def find_column(
+    headers: List[str],
+    exact: Optional[str] = None,
+    contains_all: Optional[List[str]] = None,
+) -> Optional[int]:
     for idx, header in enumerate(headers):
         current = normalize_text(header)
-        if exact and current == exact:
+
+        if exact and current.lower() == exact.lower():
             return idx
+
         if contains_all and all(token.lower() in current.lower() for token in contains_all):
             return idx
+
     return None
 
 
 @st.cache_data(show_spinner=False)
-def search_employee_in_workbook(file_bytes: bytes, file_name: str, employee_number: str) -> pd.DataFrame:
+def build_search_index(file_bytes: bytes, file_name: str) -> pd.DataFrame:
     engine = get_excel_engine(file_name)
     if engine is None:
-        raise ValueError("Formato de archivo no soportado. Usa .xls, .xlsx o .xlsm")
+        raise ValueError(f"Formato de archivo no soportado: {file_name}")
 
-    employee_number = normalize_text(employee_number)
-    excel_file = pd.ExcelFile(io.BytesIO(file_bytes), engine=engine)
-    results: List[Dict[str, str]] = []
+    results = []
 
-    for sheet_name in excel_file.sheet_names:
-        try:
-            df = pd.read_excel(
-                io.BytesIO(file_bytes),
-                sheet_name=sheet_name,
-                engine=engine,
-                dtype=object,
-            )
-        except Exception as exc:
-            results.append(
-                {
-                    "Hoja": sheet_name,
-                    "Número de empleado": "",
-                    "Nombre": "",
-                    "Mes": "",
-                    "Periodo de nómina": "",
-                    "UUID Vigente": "",
-                    "/559 Transferencia": "",
-                    "Estado": f"No se pudo leer la hoja: {exc}",
-                }
-            )
-            continue
+    with pd.ExcelFile(io.BytesIO(file_bytes), engine=engine) as excel_file:
+        for sheet_name in excel_file.sheet_names:
+            try:
+                headers_df = excel_file.parse(sheet_name=sheet_name, nrows=0)
+                headers = [normalize_text(col) for col in headers_df.columns.tolist()]
 
-        if df.empty:
-            continue
+                if not headers:
+                    continue
 
-        headers = [normalize_text(col) for col in df.columns.tolist()]
+                idx_num_empleado = 0
+                idx_nombre = find_column(headers, exact="Nombre")
 
-        idx_num_empleado = 0
-        idx_nombre = find_column(headers, exact="Nombre")
-        idx_mes = find_column(headers, exact="Mes Acumulación")
-        idx_periodo = find_column(headers, exact="Periodo Nómina")
-        idx_uuid = find_column(headers, exact="UUID Vigente")
-        idx_transfer = find_column(headers, contains_all=["559", "Transferencia"])
+                idx_mes = find_column(headers, exact="Mes Acumulación")
+                if idx_mes is None:
+                    idx_mes = find_column(headers, exact="Mes")
 
-        if idx_nombre is None or idx_mes is None or idx_periodo is None or idx_uuid is None or idx_transfer is None:
-            continue
+                idx_periodo = find_column(headers, exact="Periodo Nómina")
+                if idx_periodo is None:
+                    idx_periodo = find_column(headers, exact="Periodo de nómina")
 
-        first_col_series = df.iloc[:, idx_num_empleado].map(normalize_text)
-        matches = df[first_col_series == employee_number]
+                idx_uuid = find_column(headers, exact="UUID Vigente")
+                idx_transfer = find_column(headers, contains_all=["559", "Transferencia"])
 
-        if matches.empty:
-            continue
+                if (
+                    idx_nombre is None
+                    or idx_mes is None
+                    or idx_periodo is None
+                    or idx_uuid is None
+                    or idx_transfer is None
+                ):
+                    continue
 
-        for _, row in matches.iterrows():
-            results.append(
-                {
-                    "Hoja": sheet_name,
-                    "Número de empleado": normalize_text(row.iloc[idx_num_empleado]),
-                    "Nombre": normalize_text(row.iloc[idx_nombre]),
-                    "Mes": normalize_text(row.iloc[idx_mes]),
-                    "Periodo de nómina": normalize_text(row.iloc[idx_periodo]),
-                    "UUID Vigente": normalize_text(row.iloc[idx_uuid]),
-                    "/559 Transferencia": normalize_text(row.iloc[idx_transfer]),
-                    "Estado": "Encontrado",
-                }
-            )
+                needed_cols = sorted(
+                    set(
+                        [
+                            idx_num_empleado,
+                            idx_nombre,
+                            idx_mes,
+                            idx_periodo,
+                            idx_uuid,
+                            idx_transfer,
+                        ]
+                    )
+                )
+
+                df = excel_file.parse(
+                    sheet_name=sheet_name,
+                    usecols=needed_cols,
+                    dtype=object,
+                )
+
+                if df.empty:
+                    continue
+
+                rel_num = needed_cols.index(idx_num_empleado)
+                rel_nombre = needed_cols.index(idx_nombre)
+                rel_mes = needed_cols.index(idx_mes)
+                rel_periodo = needed_cols.index(idx_periodo)
+                rel_uuid = needed_cols.index(idx_uuid)
+                rel_transfer = needed_cols.index(idx_transfer)
+
+                selected = pd.DataFrame(
+                    {
+                        "Archivo": file_name,
+                        "Hoja": sheet_name,
+                        "Número de empleado": df.iloc[:, rel_num].map(normalize_text),
+                        "Nombre": df.iloc[:, rel_nombre].map(normalize_text),
+                        "Mes": df.iloc[:, rel_mes].map(normalize_text),
+                        "Periodo de nómina": df.iloc[:, rel_periodo].map(normalize_text),
+                        "UUID Vigente": df.iloc[:, rel_uuid].map(normalize_text),
+                        "/559 Transferencia": df.iloc[:, rel_transfer].map(normalize_text),
+                    }
+                )
+
+                selected = selected[selected["Número de empleado"] != ""].copy()
+
+                if not selected.empty:
+                    results.append(selected)
+
+            except Exception:
+                continue
 
     if not results:
-        return pd.DataFrame(columns=["Hoja", *EXPECTED_HEADERS, "Estado"])
+        return pd.DataFrame(columns=EXPECTED_HEADERS)
 
-    return pd.DataFrame(results)
+    final_df = pd.concat(results, ignore_index=True)
+    final_df["Número de empleado"] = final_df["Número de empleado"].map(normalize_text)
+    return final_df
 
 
-st.title("🔎 Búsqueda de empleado en archivo Excel")
+def search_employee(index_df: pd.DataFrame, employee_number: str) -> pd.DataFrame:
+    employee_number = normalize_text(employee_number)
+    result = index_df[index_df["Número de empleado"] == employee_number].copy()
+    return result
+
+
+st.title("🔎 Búsqueda de empleado en múltiples archivos Excel")
 st.write(
-    "Sube tu archivo de nómina y escribe el número de empleado. "
-    "La app buscará en todas las hojas y devolverá los datos clave."
+    "Sube uno o varios archivos Excel y escribe el número de empleado para buscarlo en todas las hojas."
 )
 
 with st.sidebar:
     st.header("Parámetros")
-    uploaded_file = st.file_uploader(
-        "Sube el archivo Excel",
+    uploaded_files = st.file_uploader(
+        "Sube uno o varios archivos Excel",
         type=["xls", "xlsx", "xlsm"],
-        help="La app revisa todas las hojas del archivo.",
+        accept_multiple_files=True,
+        help="La app revisa todas las hojas de todos los archivos cargados.",
     )
-    employee_number = st.text_input("Número de empleado", placeholder="Ej. 10001175")
-    search_clicked = st.button("Buscar", type="primary", use_container_width=True)
-
-st.markdown(
-    """
-    **La app devuelve estas columnas:**
-    - Número de empleado
-    - Nombre
-    - Mes
-    - Periodo de nómina
-    - UUID Vigente
-    - /559 Transferencia
-    - Hoja
-    """
-)
+    employee_number = st.text_input(
+        "Número de empleado",
+        placeholder="Ej. 10001175",
+    )
+    search_clicked = st.button(
+        "Buscar",
+        type="primary",
+        use_container_width=True,
+    )
 
 if search_clicked:
-    if uploaded_file is None:
-        st.error("Primero sube un archivo Excel.")
+    if not uploaded_files:
+        st.error("Primero sube al menos un archivo Excel.")
     elif not employee_number.strip():
         st.error("Escribe un número de empleado.")
     else:
-        with st.spinner("Buscando en todas las hojas..."):
-            file_bytes = uploaded_file.getvalue()
-            result_df = search_employee_in_workbook(file_bytes, uploaded_file.name, employee_number)
+        all_results = []
 
-        if result_df.empty:
+        with st.spinner("Procesando archivos..."):
+            for uploaded_file in uploaded_files:
+                try:
+                    file_bytes = uploaded_file.getvalue()
+                    index_df = build_search_index(file_bytes, uploaded_file.name)
+                    result_df = search_employee(index_df, employee_number)
+
+                    if not result_df.empty:
+                        all_results.append(result_df)
+
+                except Exception as e:
+                    st.warning(f"No se pudo procesar el archivo {uploaded_file.name}: {e}")
+
+        if not all_results:
             st.warning("No se encontraron coincidencias para ese número de empleado.")
         else:
-            st.success(f"Se encontraron {len(result_df)} coincidencia(s).")
-            show_df = result_df[[
-                "Hoja",
-                "Número de empleado",
-                "Nombre",
-                "Mes",
-                "Periodo de nómina",
-                "UUID Vigente",
-                "/559 Transferencia",
-            ]]
-            st.dataframe(show_df, use_container_width=True, hide_index=True)
+            final_result = pd.concat(all_results, ignore_index=True)
 
-            csv_data = show_df.to_csv(index=False).encode("utf-8-sig")
+            final_result["Origen"] = (
+                final_result["Archivo"].astype(str) + " | " + final_result["Hoja"].astype(str)
+            )
+
+            final_result = final_result[
+                [
+                    "Número de empleado",
+                    "Nombre",
+                    "Mes",
+                    "Periodo de nómina",
+                    "UUID Vigente",
+                    "/559 Transferencia",
+                    "Hoja",
+                    "Archivo",
+                    "Origen",
+                ]
+            ]
+
+            st.success(f"Se encontraron {len(final_result)} coincidencia(s).")
+            st.dataframe(final_result, use_container_width=True, hide_index=True)
+
+            csv_data = final_result.to_csv(index=False).encode("utf-8-sig")
             st.download_button(
                 "Descargar resultados en CSV",
                 data=csv_data,
                 file_name=f"resultado_empleado_{normalize_text(employee_number)}.csv",
                 mime="text/csv",
             )
-
-with st.expander("Notas técnicas"):
-    st.write(
-        "La búsqueda se hace en la primera columna de cada hoja. "
-        "La columna de /559 Transferencia se identifica por encabezado, así que aunque cambie de posición, la app la encuentra."
-    )
