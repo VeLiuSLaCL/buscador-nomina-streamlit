@@ -8,10 +8,10 @@ st.set_page_config(page_title="Búsqueda de empleado en Excel", page_icon="🔎"
 
 
 EXPECTED_HEADERS = [
-    "Número de empleado",
+    "# Emp",
     "Nombre",
     "Mes",
-    "Periodo de nómina",
+    "Periodo",
     "UUID Vigente",
     "/559 Transferencia",
 ]
